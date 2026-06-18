@@ -12,6 +12,7 @@ import google.auth.transport.requests
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
+import streamlit.components.v1 as components
 
 # ─── Configuración de página ───────────────────────────────────────────────────
 st.set_page_config(
@@ -773,10 +774,16 @@ def main():
         # Login usando target="_top" para romper el iframe de Streamlit
         # (Google bloquea cargarse dentro de iframes por seguridad → 403)
         st.markdown(
-            f'''<a href="{auth_url}" target="_top" style="
-                display:inline-block;background:#378ADD;color:white;text-decoration:none;
-                padding:10px 24px;border-radius:8px;font-weight:600;font-family:sans-serif">
-                Iniciar sesión con Google</a>''',
+            f'''
+            <a href="{auth_url}" 
+               target="_blank" 
+               onclick="setTimeout(() => {{ window.location.href = 'about:blank'; }}, 300);"
+               style="display:inline-block; background:#378ADD; color:white; text-decoration:none;
+                      padding:10px 24px; border-radius:8px; font-weight:600; font-family:sans-serif;
+                      text-align:center;">
+                Iniciar sesión con Google
+            </a>
+            ''',
             unsafe_allow_html=True
         )
         qp = st.query_params
