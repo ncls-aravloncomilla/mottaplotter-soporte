@@ -765,11 +765,19 @@ def main():
             "response_type": "code",
             "scope": SCOPES,
             "access_type": "offline",
-            "prompt": "select_account",
+            # consent fuerza a Google a entregar refresh_token (sesión persistente)
+            "prompt": "consent select_account",
             "state": state,
         }
         auth_url = "https://accounts.google.com/o/oauth2/auth?" + urllib.parse.urlencode(params)
-        st.link_button("Iniciar sesión con Google", auth_url, type="primary")
+        # Login en la MISMA pestaña (evita dejar ventana vieja abierta)
+        st.markdown(
+            f'''<a href="{auth_url}" target="_self" style="
+                display:inline-block;background:#378ADD;color:white;text-decoration:none;
+                padding:10px 24px;border-radius:8px;font-weight:600;font-family:sans-serif">
+                Iniciar sesión con Google</a>''',
+            unsafe_allow_html=True
+        )
         qp = st.query_params
         if "code" in qp and "error" not in qp:
             import httpx
@@ -785,9 +793,11 @@ def main():
             )
             if token_resp.status_code == 200:
                 token = token_resp.json()
+                # Conservar refresh_token previo si Google no devuelve uno nuevo
+                prev_refresh = st.session_state.get("google_token", {}).get("refresh_token", "")
                 st.session_state["google_token"] = {
                     "token": token["access_token"],
-                    "refresh_token": token.get("refresh_token", ""),
+                    "refresh_token": token.get("refresh_token") or prev_refresh,
                 }
                 user_info = httpx.get(
                     "https://www.googleapis.com/oauth2/v3/userinfo",
@@ -906,6 +916,11 @@ def main():
                     st.markdown(f"**Inicio:** {sd.get('fecha_inicio', '—')}")
                     st.markdown(f"**Fin:** {sd.get('fecha_fin', '—')}")
                     st.markdown(f"**Descripción:** {sd.get('descripcion', '—')}")
+                    if st.button("🗑️ Borrar datos extraídos", key="btn_borrar_solicitud"):
+                        st.session_state.pop("solicitud_data", None)
+                        st.session_state.pop("_fecha_inicio_pre", None)
+                        st.session_state.pop("_fecha_fin_pre", None)
+                        st.rerun()
 
         if st.button("Visualizar", type="primary", use_container_width=True, key="btn_visualizar"):
             if not fecha_inicio or not fecha_fin:
