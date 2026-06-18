@@ -770,9 +770,10 @@ def main():
             "state": state,
         }
         auth_url = "https://accounts.google.com/o/oauth2/auth?" + urllib.parse.urlencode(params)
-        # Login en la MISMA pestaña (evita dejar ventana vieja abierta)
+        # Login usando target="_top" para romper el iframe de Streamlit
+        # (Google bloquea cargarse dentro de iframes por seguridad → 403)
         st.markdown(
-            f'''<a href="{auth_url}" target="_self" style="
+            f'''<a href="{auth_url}" target="_top" style="
                 display:inline-block;background:#378ADD;color:white;text-decoration:none;
                 padding:10px 24px;border-radius:8px;font-weight:600;font-family:sans-serif">
                 Iniciar sesión con Google</a>''',
