@@ -468,11 +468,11 @@ def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud
     if req_start_dt and req_end_dt:
         legend_html += ('<span style="display:flex;align-items:center;gap:5px">'
                         '<span style="width:10px;height:10px;border-radius:2px;'
-                        'background:#4CAF50;flex-shrink:0"></span>'
+                        'background:#8BF58F;flex-shrink:0"></span>'
                         '<span>Cumple solicitud</span></span>')
         legend_html += ('<span style="display:flex;align-items:center;gap:5px">'
                         '<span style="width:10px;height:10px;border-radius:2px;'
-                        'background:#E53935;flex-shrink:0"></span>'
+                        'background:#FF716D;flex-shrink:0"></span>'
                         '<span>No cumple solicitud</span></span>')
 
     import json as _json
