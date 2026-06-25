@@ -269,6 +269,59 @@ def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud
     device_color_map = {d: _base_colors[i % len(_base_colors)]
                         for i, d in enumerate(device_names)}
 
+    # ── Rango solicitado (de la imagen) como datetime absolutos, cruza medianoche ──
+    req_start_dt, req_end_dt, req_devices = None, None, set()
+    if solicitud_data:
+        def _parse_dt(s):
+            if not s: return None
+            try:
+                return datetime.strptime(s.strip(), "%d/%m/%Y %H:%M")
+            except Exception:
+                return None
+        req_start_dt = _parse_dt(solicitud_data.get("fecha_inicio"))
+        req_end_dt   = _parse_dt(solicitud_data.get("fecha_fin"))
+        servicio = (solicitud_data.get("servicio") or "").lower()
+        if "iluminac" in servicio: req_devices.add("ilum")
+        if "clima" in servicio:    req_devices.add("clima")
+        if not req_devices:  # si no se reconoce, aplica a todos
+            req_devices = {"ilum", "clima"}
+
+    def _device_matches_req(device_name):
+        dn = device_name.lower()
+        is_clima = "clima" in dn
+        is_ilum  = ("ilum" in dn) or ("iluminac" in dn)
+        if is_clima and "clima" in req_devices: return True
+        if is_ilum and "ilum" in req_devices:   return True
+        if not is_clima and not is_ilum:        return True  # dispositivo no clasificado, no se filtra
+        return False
+
+    def compute_compliance(day_obj, on_intervals, device_name):
+        """Devuelve lista de (inicio_seg, fin_seg, cumple:bool) recortada a la
+        intersección del rango solicitado con el día actual. [] si no aplica."""
+        if not req_start_dt or not req_end_dt or not _device_matches_req(device_name):
+            return []
+        day_start = datetime.combine(day_obj, datetime.min.time())
+        day_end   = day_start + timedelta(days=1)
+        win_start = max(req_start_dt, day_start)
+        win_end   = min(req_end_dt, day_end)
+        if win_start >= win_end:
+            return []
+        s_sec = int((win_start - day_start).total_seconds())
+        e_sec = int((win_end   - day_start).total_seconds())
+        # Partir [s_sec,e_sec] según on_intervals: tramos encendidos=cumple, resto=no cumple
+        result = []
+        cur = s_sec
+        for on_s, on_e in sorted(on_intervals):
+            on_s, on_e = max(on_s, s_sec), min(on_e, e_sec)
+            if on_e <= on_s: continue
+            if on_s > cur:
+                result.append((cur, on_s, False))
+            result.append((on_s, on_e, True))
+            cur = on_e
+        if cur < e_sec:
+            result.append((cur, e_sec, False))
+        return result
+
     # Helper: calcula relay_rows y ext_delta para un dispositivo+día
     def compute_device_day(device_name, device, date_obj):
         color        = device_color_map[device_name]
@@ -279,6 +332,7 @@ def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud
 
         relay_rows  = {}
         normal_rows = {}
+        relay_compliance = {}  # delta de cumplimiento por relay (verde/rojo)
         for relay_key, normal_cfg in device["config_x_relay"].items():
             normal_on = get_relay_on_intervals(normal_cfg, weekday_num,
                                                channel_schedules, any_ww_device)
@@ -286,8 +340,10 @@ def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud
             special_cfg = get_special_config_for_day(device, relay_key,
                                                       date_str_raw, global_special_days)
             active_cfg  = special_cfg if special_cfg else normal_cfg
-            relay_rows[relay_key] = get_relay_on_intervals(active_cfg, weekday_num,
-                                                            channel_schedules, any_ww_device)
+            on_now = get_relay_on_intervals(active_cfg, weekday_num,
+                                            channel_schedules, any_ww_device)
+            relay_rows[relay_key] = on_now
+            relay_compliance[relay_key] = compute_compliance(date_obj, on_now, device_name)
         ext_delta = []
         relay_deltas = {}  # delta individual por relay (para amarillo por fila)
         if is_ext:
@@ -302,6 +358,7 @@ def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud
             "is_ext": is_ext, "color": color,
             "relay_rows": relay_rows, "ext_delta": ext_delta,
             "relay_deltas": relay_deltas,
+            "relay_compliance": relay_compliance,
         }
 
     segments = []
@@ -317,13 +374,15 @@ def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud
         for device_name, device in relay_control["devices"].items():
             color = device_color_map[device_name]
             for relay_key in device["config_x_relay"].keys():
-                relay_rows  = {}
-                row_deltas  = {}  # day_label → delta de ese día para este relay
+                relay_rows   = {}
+                row_deltas   = {}  # day_label → delta de ese día para este relay
+                row_compliance = {}  # day_label → cumplimiento de ese día para este relay
                 any_ext = False
                 for date_obj in date_list:
                     dd = compute_device_day(device_name, device, date_obj)
                     day_label = f"{dd['day_str'][:5]}{'  ★' if dd['is_ext'] else ''}"
                     relay_rows[day_label] = dd["relay_rows"].get(relay_key, [])
+                    row_compliance[day_label] = dd["relay_compliance"].get(relay_key, [])
                     if dd["is_ext"]:
                         any_ext = True
                         # Delta específico de ESTE relay en ESTE día
@@ -344,6 +403,7 @@ def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud
                     "relay_rows": relay_rows,
                     "ext_delta": [],          # sin delta de segmento en vista canal
                     "row_deltas": row_deltas, # delta por fila
+                    "row_compliance": row_compliance,
                 })
 
     # Construir filas planas
@@ -352,9 +412,10 @@ def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud
     for seg in segments:
         keys      = list(seg["relay_rows"].keys())
         first_row = len(all_rows)
-        # En modo "dia" el delta por fila viene en relay_deltas (keyed por relay)
-        # En modo "canal" viene en row_deltas (keyed por día)
-        row_deltas = seg.get("row_deltas") or seg.get("relay_deltas", {})
+        # En modo "dia" el delta/compliance por fila viene keyed por relay
+        # En modo "canal" viene keyed por día
+        row_deltas     = seg.get("row_deltas")     or seg.get("relay_deltas", {})
+        row_compliance = seg.get("row_compliance") or seg.get("relay_compliance", {})
         for key in keys:
             all_rows.append({
                 "label":        key,
@@ -364,6 +425,7 @@ def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud
                 "device_name":  seg["device_name"],
                 "is_ext":       seg["is_ext"],
                 "row_delta":    row_deltas.get(key, []),
+                "compliance":   row_compliance.get(key, []),
             })
         seg_meta.append({
             "first":       first_row,
@@ -403,6 +465,15 @@ def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud
                         '<span style="width:10px;height:10px;border-radius:2px;'
                         'background:#FEF3CD;border:1px dashed #BA7517;flex-shrink:0"></span>'
                         '<span>Extensión</span></span>')
+    if req_start_dt and req_end_dt:
+        legend_html += ('<span style="display:flex;align-items:center;gap:5px">'
+                        '<span style="width:10px;height:10px;border-radius:2px;'
+                        'background:#4CAF50;flex-shrink:0"></span>'
+                        '<span>Cumple solicitud</span></span>')
+        legend_html += ('<span style="display:flex;align-items:center;gap:5px">'
+                        '<span style="width:10px;height:10px;border-radius:2px;'
+                        'background:#E53935;flex-shrink:0"></span>'
+                        '<span>No cumple solicitud</span></span>')
 
     import json as _json
     rows_json      = _json.dumps(all_rows, default=str)
@@ -530,6 +601,24 @@ allRows.forEach((row,i)=>{{
     ctx.fillRect(x0,amberTop,x1-x0,amberH);
     ctx.setLineDash([3,3]);ctx.strokeStyle='rgba(186,117,23,0.75)';ctx.lineWidth=1;
     ctx.strokeRect(x0,amberTop,x1-x0,amberH);ctx.setLineDash([]);
+  }});
+}});
+
+// Compliance overlay — verde (cumple) / rojo (no cumple) sobre el tramo
+// solicitado, dibujado encima del amarillo
+allRows.forEach((row,i)=>{{
+  if(!row.compliance||!row.compliance.length)return;
+  const top = i*ROW_H + PAD_TOP - PAD_EXT;
+  const h   = BAR_H + PAD_EXT*2;
+  row.compliance.forEach(([s,e,ok])=>{{
+    const x0=secToX(s),x1=secToX(e);
+    ctx.fillStyle = ok ? 'rgba(76,175,80,0.85)' : 'rgba(229,57,53,0.85)';
+    ctx.fillRect(x0,top,x1-x0,h);
+    ctx.setLineDash([3,3]);
+    ctx.strokeStyle = ok ? 'rgba(46,125,50,0.9)' : 'rgba(183,28,28,0.9)';
+    ctx.lineWidth=1;
+    ctx.strokeRect(x0,top,x1-x0,h);
+    ctx.setLineDash([]);
   }});
 }});
 
