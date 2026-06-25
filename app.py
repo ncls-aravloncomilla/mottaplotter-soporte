@@ -709,9 +709,19 @@ dayGroups.forEach((dg,di)=>{{
   ctx.fillRect(0,y,W,h);
 }});
 
-// Grid lines
-ctx.strokeStyle='rgba(0,0,0,0.05)';ctx.lineWidth=0.5;
-for(let h=0;h<=24;h+=2){{const px=secToX(h*3600);ctx.beginPath();ctx.moveTo(px,0);ctx.lineTo(px,allRows.length*ROW_H);ctx.stroke();}}
+// Grid lines — línea marcada cada hora, línea tenue cada media hora
+// (alineadas con las etiquetas del eje X) para ubicar mejor los horarios
+const gridH = allRows.length * ROW_H;
+ctx.lineWidth = 0.5;
+for (let halfH = 0; halfH <= 48; halfH++) {{
+  const px = secToX(halfH * 1800);
+  const esHoraEntera = (halfH % 2 === 0);
+  ctx.strokeStyle = esHoraEntera ? 'rgba(0,0,0,0.13)' : 'rgba(0,0,0,0.07)';
+  ctx.beginPath();
+  ctx.moveTo(px, 0);
+  ctx.lineTo(px, gridH);
+  ctx.stroke();
+}}
 
 // Amber highlights — siempre por fila individual (solo donde hubo cambio real)
 allRows.forEach((row,i)=>{{
