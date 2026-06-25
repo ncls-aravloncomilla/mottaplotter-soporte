@@ -12,6 +12,7 @@ import google.auth.transport.requests
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
+import re as _re_top
 
 # ─── Configuración de página ───────────────────────────────────────────────────
 st.set_page_config(
@@ -318,13 +319,16 @@ def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud
     # el comportamiento general (todos los relés del dispositivo correspondiente).
     matched_relay_names = set()
     sector_mencionado = (solicitud_data or {}).get("sector_mencionado")
+    pdf_contexto = ""
     if sector_mencionado:
+        codigo_suc = extraer_codigo_sucursal(sucursal_name)
+        pdf_contexto = cargar_pdf_sucursal_texto(codigo_suc)
         all_relay_names = tuple(sorted(set(
             rk for dev in relay_control["devices"].values()
             for rk in dev["config_x_relay"].keys()
         )))
         try:
-            matched_relay_names = set(match_relays_sector(sector_mencionado, all_relay_names))
+            matched_relay_names = set(match_relays_sector(sector_mencionado, all_relay_names, pdf_contexto))
         except Exception:
             matched_relay_names = set()
 
@@ -494,8 +498,9 @@ def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud
         if solicitud_data.get("descripcion"): desc_line = solicitud_data["descripcion"]
     meta_str  = "  ".join(meta_parts)
     sector_note = ""
+    _fuente = " (según PDF de la sucursal)" if pdf_contexto else ""
     if sector_mencionado and matched_relay_names:
-        sector_note = f"Sector identificado: {sector_mencionado} → {', '.join(sorted(matched_relay_names))}"
+        sector_note = f"Sector identificado{_fuente}: {sector_mencionado} → {', '.join(sorted(matched_relay_names))}"
     elif sector_mencionado:
         sector_note = f"Sector mencionado: {sector_mencionado} (sin coincidencia clara con relés — se evalúan todos)"
     sector_html = f'<div class="meta" style="color:#6B7280">{sector_note}</div>' if sector_note else ""
@@ -889,10 +894,48 @@ def parse_fecha(fecha_str):
         return None
 
 
+PDF_SUCURSALES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pdfs_sucursales")
+
+
+def extraer_codigo_sucursal(sucursal_name: str) -> str:
+    """Extrae el código de tienda (ej. 'R019') desde el nombre de sucursal
+    (ej. 'R019 - Iquique' -> 'R019')."""
+    if not sucursal_name:
+        return ""
+    match = _re_top.match(r"^\s*([A-Za-z]+\d+)", sucursal_name)
+    return match.group(1).upper() if match else ""
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
-def match_relays_sector(sector_mencionado: str, relay_names_tuple: tuple) -> list:
+def cargar_pdf_sucursal_texto(codigo_sucursal: str) -> str:
+    """Busca pdfs_sucursales/{codigo}.pdf y devuelve su texto extraído.
+    Devuelve '' si no existe el archivo para esa sucursal."""
+    if not codigo_sucursal:
+        return ""
+    pdf_path = os.path.join(PDF_SUCURSALES_DIR, f"{codigo_sucursal}.pdf")
+    if not os.path.isfile(pdf_path):
+        return ""
+    try:
+        import pdfplumber
+        texto_paginas = []
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages:
+                t = page.extract_text()
+                if t:
+                    texto_paginas.append(t)
+        return "\n".join(texto_paginas)
+    except Exception:
+        return ""
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def match_relays_sector(sector_mencionado: str, relay_names_tuple: tuple,
+                         pdf_contexto: str = "") -> list:
     """Usa Claude (solo texto) para identificar qué relays, de la lista real
     del dispositivo, corresponden al sector/piso mencionado en la solicitud.
+    Si se entrega pdf_contexto (texto del PDF de horarios de la sucursal),
+    se usa como fuente de verdad principal para el mapeo sector→relés, ya que
+    contiene la tabla oficial "Escenarios de iluminación según tipo de trabajo".
     Devuelve lista de nombres de relay que coinciden, o [] si no aplica/no hay match.
     """
     if not sector_mencionado or not relay_names_tuple:
@@ -900,26 +943,49 @@ def match_relays_sector(sector_mencionado: str, relay_names_tuple: tuple) -> lis
     import anthropic, json as _json, re as _re
     client = anthropic.Anthropic(api_key=st.secrets["anthropic"]["api_key"])
     relay_list_str = "\n".join(f"- {r}" for r in relay_names_tuple)
+
+    if pdf_contexto:
+        prompt = (
+            f"Una solicitud de extensión horaria menciona este sector/área de trabajo:\n"
+            f'"{sector_mencionado}"\n\n'
+            f"Este es el documento oficial de horarios y escenarios de iluminación de "
+            f"la sucursal, que incluye una tabla de qué relé debe encenderse según el "
+            f"tipo de trabajo o sector:\n\n{pdf_contexto}\n\n"
+            f"Estos son los nombres reales de los relés/canales configurados en el "
+            f"dispositivo (pueden no coincidir exactamente en texto con el documento, "
+            f"pero deben corresponder por número de RTU/relé o por piso/área):\n"
+            f"{relay_list_str}\n\n"
+            "Usando la tabla de 'Escenarios de iluminación según tipo de trabajo' del "
+            "documento como fuente de verdad, identifica ÚNICAMENTE los relés que "
+            "deben encenderse para el sector/trabajo mencionado en la solicitud. "
+            "Sé preciso: si el documento indica que solo cierto piso o relé específico "
+            "corresponde al trabajo, no incluyas otros pisos o relés aunque tengan "
+            "nombres similares. Si no hay relación clara, responde con lista vacía.\n"
+            "Responde ÚNICAMENTE con un array JSON de strings con los nombres EXACTOS "
+            "de los relés que coinciden, tal como aparecen en la lista de relés reales. "
+            "Sin texto adicional.\n"
+            'Ejemplo de formato: ["Piso 1 emergencia", "Escalera mecanica"]'
+        )
+    else:
+        prompt = (
+            f"Una solicitud de extensión horaria menciona este sector/área de trabajo:\n"
+            f'"{sector_mencionado}"\n\n'
+            f"Estos son los nombres reales de los relés/canales configurados en el dispositivo:\n"
+            f"{relay_list_str}\n\n"
+            "Identifica cuáles de esos relés corresponden al sector mencionado "
+            "(ej. si menciona 'Piso 1' y 'Escalera Mecánica', deben coincidir relés "
+            "con esos nombres o equivalentes). Si el sector menciona varias áreas, "
+            "incluye los relés de todas. Si no puedes determinar relación clara con "
+            "ningún relé, responde con lista vacía.\n"
+            "Responde ÚNICAMENTE con un array JSON de strings con los nombres EXACTOS "
+            "de los relés que coinciden, tal como aparecen en la lista. Sin texto adicional.\n"
+            'Ejemplo de formato: ["Piso 1 emergencia", "Escalera mecanica"]'
+        )
+
     msg = client.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=300,
-        messages=[{
-            "role": "user",
-            "content": (
-                f"Una solicitud de extensión horaria menciona este sector/área de trabajo:\n"
-                f'"{sector_mencionado}"\n\n'
-                f"Estos son los nombres reales de los relés/canales configurados en el dispositivo:\n"
-                f"{relay_list_str}\n\n"
-                "Identifica cuáles de esos relés corresponden al sector mencionado "
-                "(ej. si menciona 'Piso 1' y 'Escalera Mecánica', deben coincidir relés "
-                "con esos nombres o equivalentes). Si el sector menciona varias áreas, "
-                "incluye los relés de todas. Si no puedes determinar relación clara con "
-                "ningún relé, responde con lista vacía.\n"
-                "Responde ÚNICAMENTE con un array JSON de strings con los nombres EXACTOS "
-                "de los relés que coinciden, tal como aparecen en la lista. Sin texto adicional.\n"
-                'Ejemplo de formato: ["Piso 1 emergencia", "Escalera mecanica"]'
-            )
-        }]
+        max_tokens=400,
+        messages=[{"role": "user", "content": prompt}]
     )
     text = msg.content[0].text.strip()
     text = _re.sub(r'^```[a-z]*\n?', '', text)
