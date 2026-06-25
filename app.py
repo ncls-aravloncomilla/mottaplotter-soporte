@@ -851,21 +851,30 @@ def main():
             "state": state,
         }
         auth_url = "https://accounts.google.com/o/oauth2/auth?" + urllib.parse.urlencode(params)
-        # Usar JS para navegar en el top-level window (rompe el iframe de Streamlit)
-        st.components.v1.html(
-            f'''<script>
-            function doLogin() {{
-                window.top.location.href = "{auth_url}";
-            }}
-            </script>
-            <button onclick="doLogin()" style="
-                background:#378ADD;color:white;border:none;border-radius:8px;
-                padding:10px 24px;font-size:15px;font-weight:600;
-                font-family:sans-serif;cursor:pointer">
-                Iniciar sesión con Google
-            </button>''',
-            height=60,
-        )
+        # Botón nativo de Streamlit (siempre clickeable) + JS que intenta romper
+        # el iframe por varias vías, con fallback visible si todas fallan.
+        if st.button("Iniciar sesión con Google", type="primary", key="btn_google_login"):
+            st.session_state["_pending_auth_url"] = auth_url
+            st.rerun()
+
+        if st.session_state.get("_pending_auth_url"):
+            _url = st.session_state["_pending_auth_url"]
+            st.components.v1.html(
+                f'''<script>
+                (function() {{
+                    var url = "{_url}";
+                    try {{ window.top.location.href = url; return; }} catch(e) {{}}
+                    try {{ window.parent.location.href = url; return; }} catch(e) {{}}
+                    window.location.href = url;
+                }})();
+                </script>''',
+                height=0,
+            )
+            st.markdown(
+                f'Si no fuiste redirigido automáticamente, '
+                f'<a href="{_url}" target="_blank">haz clic aquí para continuar</a>.',
+                unsafe_allow_html=True
+            )
         qp = st.query_params
         if "code" in qp and "error" not in qp:
             import httpx
@@ -893,6 +902,7 @@ def main():
                 ).json()
                 st.session_state["user_email"] = user_info.get("email", "")
                 st.session_state["user_name"]  = user_info.get("name", "")
+                st.session_state.pop("_pending_auth_url", None)
                 st.query_params.clear()
                 st.rerun()
             else:
