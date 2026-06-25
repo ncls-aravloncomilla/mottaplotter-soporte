@@ -635,8 +635,8 @@ body{{background:white;font-family:Arial,sans-serif;padding:16px}}
 .y-row{{height:{ROW_H}px;display:flex;align-items:flex-start;justify-content:flex-end;
         padding-right:8px;padding-top:{PAD_TOP}px;font-size:9px;color:#555;
         white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
-.x-axis{{display:flex;border-top:1px solid #ddd;margin-top:2px}}
-.x-tick{{flex:1;font-size:8px;color:#999;padding-top:2px;text-align:center}}
+.x-axis{{position:relative;border-top:1px solid #ddd;margin-top:2px}}
+.x-tick{{position:absolute;top:0;font-size:8px;color:#999;padding-top:2px;white-space:nowrap}}
 .meta{{font-size:11px;color:#888;margin-bottom:4px;margin-top:2px}}
 .desc{{font-size:11px;color:#aaa;font-style:italic;margin-bottom:8px}}
 </style>
@@ -679,10 +679,18 @@ allRows.forEach((row,i)=>{{
 }});
 
 const xAxis=document.getElementById('xaxis');
+xAxis.style.position='relative';
+xAxis.style.height='14px';
 for(let h=0;h<=24;h+=2){{
   const d=document.createElement('div');
   d.className='x-tick';
   d.textContent=String(h).padStart(2,'0')+':00';
+  const px = (h*3600)/86400*W;  // misma fórmula que secToX, calculada antes de su definición
+  d.style.position='absolute';
+  d.style.left=px+'px';
+  d.style.transform='translateX(-50%)';
+  if (h===0) {{ d.style.left='0px'; d.style.transform='none'; }}
+  if (h===24) {{ d.style.left=W+'px'; d.style.transform='translateX(-100%)'; }}
   xAxis.appendChild(d);
 }}
 
