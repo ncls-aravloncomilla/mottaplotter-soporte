@@ -12,7 +12,6 @@ import google.auth.transport.requests
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
-import streamlit.components.v1 as components
 
 # ─── Configuración de página ───────────────────────────────────────────────────
 st.set_page_config(
@@ -290,15 +289,19 @@ def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud
             relay_rows[relay_key] = get_relay_on_intervals(active_cfg, weekday_num,
                                                             channel_schedules, any_ww_device)
         ext_delta = []
+        relay_deltas = {}  # delta individual por relay (para amarillo por fila)
         if is_ext:
             all_delta = []
             for rk in relay_rows:
-                all_delta.extend(diff_intervals(normal_rows[rk], relay_rows[rk]))
+                d = merge_intervals(diff_intervals(normal_rows[rk], relay_rows[rk]))
+                relay_deltas[rk] = d
+                all_delta.extend(d)
             ext_delta = merge_intervals(all_delta)
         return {
             "device_name": device_name, "day_str": day_str,
             "is_ext": is_ext, "color": color,
             "relay_rows": relay_rows, "ext_delta": ext_delta,
+            "relay_deltas": relay_deltas,
         }
 
     segments = []
@@ -349,7 +352,9 @@ def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud
     for seg in segments:
         keys      = list(seg["relay_rows"].keys())
         first_row = len(all_rows)
-        row_deltas = seg.get("row_deltas", {})
+        # En modo "dia" el delta por fila viene en relay_deltas (keyed por relay)
+        # En modo "canal" viene en row_deltas (keyed por día)
+        row_deltas = seg.get("row_deltas") or seg.get("relay_deltas", {})
         for key in keys:
             all_rows.append({
                 "label":        key,
@@ -514,37 +519,19 @@ dayGroups.forEach((dg,di)=>{{
 ctx.strokeStyle='rgba(0,0,0,0.05)';ctx.lineWidth=0.5;
 for(let h=0;h<=24;h+=2){{const px=secToX(h*3600);ctx.beginPath();ctx.moveTo(px,0);ctx.lineTo(px,allRows.length*ROW_H);ctx.stroke();}}
 
-// Amber highlights
-// Vista 'dia': delta del segmento completo (todas las barritas del dispositivo)
-// Vista 'canal': delta por fila individual (solo días extendidos, solo su rango)
-if (VIEW_MODE === 'dia') {{
-  segMeta.forEach(sm=>{{
-    if(!sm.is_ext||!sm.ext_delta||!sm.ext_delta.length)return;
-    const amberTop = sm.first*ROW_H + PAD_TOP - PAD_EXT;
-    const amberBot = sm.last*ROW_H  + PAD_TOP + BAR_H + PAD_EXT;
-    const amberH   = amberBot - amberTop;
-    sm.ext_delta.forEach(([s,e])=>{{
-      const x0=secToX(s),x1=secToX(e);
-      ctx.fillStyle='rgba(254,243,205,0.92)';
-      ctx.fillRect(x0,amberTop,x1-x0,amberH);
-      ctx.setLineDash([3,3]);ctx.strokeStyle='rgba(186,117,23,0.75)';ctx.lineWidth=1;
-      ctx.strokeRect(x0,amberTop,x1-x0,amberH);ctx.setLineDash([]);
-    }});
+// Amber highlights — siempre por fila individual (solo donde hubo cambio real)
+allRows.forEach((row,i)=>{{
+  if(!row.row_delta||!row.row_delta.length)return;
+  const amberTop = i*ROW_H + PAD_TOP - PAD_EXT;
+  const amberH   = BAR_H + PAD_EXT*2;
+  row.row_delta.forEach(([s,e])=>{{
+    const x0=secToX(s),x1=secToX(e);
+    ctx.fillStyle='rgba(254,243,205,0.92)';
+    ctx.fillRect(x0,amberTop,x1-x0,amberH);
+    ctx.setLineDash([3,3]);ctx.strokeStyle='rgba(186,117,23,0.75)';ctx.lineWidth=1;
+    ctx.strokeRect(x0,amberTop,x1-x0,amberH);ctx.setLineDash([]);
   }});
-}} else {{
-  allRows.forEach((row,i)=>{{
-    if(!row.row_delta||!row.row_delta.length)return;
-    const amberTop = i*ROW_H + PAD_TOP - PAD_EXT;
-    const amberH   = BAR_H + PAD_EXT*2;
-    row.row_delta.forEach(([s,e])=>{{
-      const x0=secToX(s),x1=secToX(e);
-      ctx.fillStyle='rgba(254,243,205,0.92)';
-      ctx.fillRect(x0,amberTop,x1-x0,amberH);
-      ctx.setLineDash([3,3]);ctx.strokeStyle='rgba(186,117,23,0.75)';ctx.lineWidth=1;
-      ctx.strokeRect(x0,amberTop,x1-x0,amberH);ctx.setLineDash([]);
-    }});
-  }});
-}}
+}});
 
 // Bars
 allRows.forEach((row,i)=>{{
@@ -771,20 +758,20 @@ def main():
             "state": state,
         }
         auth_url = "https://accounts.google.com/o/oauth2/auth?" + urllib.parse.urlencode(params)
-        # Login usando target="_top" para romper el iframe de Streamlit
-        # (Google bloquea cargarse dentro de iframes por seguridad → 403)
-        st.markdown(
-            f'''
-            <a href="{auth_url}" 
-               target="_blank" 
-               onclick="setTimeout(() => {{ window.location.href = 'about:blank'; }}, 300);"
-               style="display:inline-block; background:#378ADD; color:white; text-decoration:none;
-                      padding:10px 24px; border-radius:8px; font-weight:600; font-family:sans-serif;
-                      text-align:center;">
+        # Usar JS para navegar en el top-level window (rompe el iframe de Streamlit)
+        st.components.v1.html(
+            f'''<script>
+            function doLogin() {{
+                window.top.location.href = "{auth_url}";
+            }}
+            </script>
+            <button onclick="doLogin()" style="
+                background:#378ADD;color:white;border:none;border-radius:8px;
+                padding:10px 24px;font-size:15px;font-weight:600;
+                font-family:sans-serif;cursor:pointer">
                 Iniciar sesión con Google
-            </a>
-            ''',
-            unsafe_allow_html=True
+            </button>''',
+            height=60,
         )
         qp = st.query_params
         if "code" in qp and "error" not in qp:
