@@ -257,25 +257,37 @@ def _normalizar_texto(s):
     s = _re_top.sub(r"\s+", " ", s).strip()
     return s
 
-REGLAS_DESCRIPCION_SECTOR = {
+# Reglas explícitas: descripción del trabajo → patrones regex que deben
+# coincidir con los NOMBRES REALES de los relays (no texto de sector libre,
+# para no depender de que Claude infiera correctamente el matiz normal/emergencia).
+# Clave: código de sucursal (o "*" para todas las sucursales).
+REGLAS_DESCRIPCION_RELAYS = {
     "*": [
         # "descarga camion" / "descarga de camion" / con o sin acentos
-        (r"descarga\s+(de\s+)?camion", "Sala Venta Piso 1, Escalera Mecánica"),
+        # → según PDF: Piso 1 emergencia (no normal) + Escalera mecánica
+        (r"descarga\s+(de\s+)?camion", [r"piso\s*1.*emergenc", r"escalera"]),
     ],
 }
 
-def resolver_sector_por_descripcion(codigo_sucursal, descripcion):
+def resolver_relays_por_descripcion(codigo_sucursal, descripcion, relay_names_tuple):
     """Si la descripción coincide con una regla conocida (genérica o específica
-    de la sucursal), devuelve el sector equivalente a usar. Si no hay match,
-    devuelve None (se sigue el flujo normal con sector_mencionado/Claude)."""
+    de la sucursal), devuelve directamente los nombres EXACTOS de relays que
+    matchean los patrones de esa regla (sin pasar por Claude). Devuelve []
+    si no hay regla aplicable (se sigue el flujo normal con Claude)."""
     desc_norm = _normalizar_texto(descripcion)
-    if not desc_norm:
-        return None
-    reglas = REGLAS_DESCRIPCION_SECTOR.get(codigo_sucursal, []) + REGLAS_DESCRIPCION_SECTOR.get("*", [])
-    for patron, sector_equivalente in reglas:
-        if _re_top.search(patron, desc_norm):
-            return sector_equivalente
-    return None
+    if not desc_norm or not relay_names_tuple:
+        return []
+    reglas = REGLAS_DESCRIPCION_RELAYS.get(codigo_sucursal, []) + REGLAS_DESCRIPCION_RELAYS.get("*", [])
+    for patron_desc, patrones_relay in reglas:
+        if _re_top.search(patron_desc, desc_norm):
+            matched = []
+            for rk in relay_names_tuple:
+                rk_norm = _normalizar_texto(rk)
+                if any(_re_top.search(p, rk_norm) for p in patrones_relay):
+                    matched.append(rk)
+            if matched:
+                return matched
+    return []
 
 
 # ─── Generador de HTML del gráfico ─────────────────────────────────────────────
@@ -360,24 +372,24 @@ def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud
     descripcion_trabajo  = (solicitud_data or {}).get("descripcion")
     pdf_contexto = ""
     codigo_suc   = extraer_codigo_sucursal(sucursal_name)
-    sector_via_regla_explicita = resolver_sector_por_descripcion(codigo_suc, descripcion_trabajo)
-    if sector_via_regla_explicita:
-        # Regla de negocio conocida y fija: la descripción prevalece sobre
-        # cualquier sector marcado manualmente (que puede tener error humano).
-        sector_mencionado_efectivo = sector_via_regla_explicita
-    else:
-        sector_mencionado_efectivo = sector_mencionado
 
-    if sector_mencionado_efectivo or descripcion_trabajo:
+    all_relay_names = tuple(sorted(set(
+        rk for dev in relay_control["devices"].values()
+        for rk in dev["config_x_relay"].keys()
+    )))
+
+    # 1) Regla explícita conocida: match directo contra nombres reales de relays,
+    #    sin pasar por Claude — más confiable para casos de excepción documentados.
+    relays_via_regla = resolver_relays_por_descripcion(codigo_suc, descripcion_trabajo, all_relay_names)
+
+    if relays_via_regla:
+        matched_relay_names = set(relays_via_regla)
+    elif sector_mencionado or descripcion_trabajo:
+        # 2) Sin regla explícita: usar Claude con sector + descripción + PDF (si existe)
         pdf_contexto = cargar_pdf_sucursal_texto(codigo_suc)
-        all_relay_names = tuple(sorted(set(
-            rk for dev in relay_control["devices"].values()
-            for rk in dev["config_x_relay"].keys()
-        )))
         try:
             matched_relay_names = set(match_relays_sector(
-                sector_mencionado_efectivo, all_relay_names, pdf_contexto,
-                descripcion_trabajo if not sector_via_regla_explicita else ""
+                sector_mencionado, all_relay_names, pdf_contexto, descripcion_trabajo
             ))
         except Exception:
             matched_relay_names = set()
@@ -548,11 +560,16 @@ def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud
         if solicitud_data.get("descripcion"): desc_line = solicitud_data["descripcion"]
     meta_str  = "  ".join(meta_parts)
     sector_note = ""
-    _fuente = " (según PDF de la sucursal)" if pdf_contexto else ""
-    if sector_mencionado and matched_relay_names:
-        sector_note = f"Sector identificado{_fuente}: {sector_mencionado} → {', '.join(sorted(matched_relay_names))}"
-    elif sector_mencionado:
-        sector_note = f"Sector mencionado: {sector_mencionado} (sin coincidencia clara con relés — se evalúan todos)"
+    if relays_via_regla:
+        sector_note = (f"Trabajo identificado por regla conocida: \"{descripcion_trabajo}\" "
+                        f"→ {', '.join(sorted(matched_relay_names))}")
+    elif matched_relay_names:
+        _fuente = " según PDF de la sucursal" if pdf_contexto else ""
+        ref = sector_mencionado or descripcion_trabajo
+        sector_note = f"Sector identificado{_fuente}: {ref} → {', '.join(sorted(matched_relay_names))}"
+    elif sector_mencionado or descripcion_trabajo:
+        ref = sector_mencionado or descripcion_trabajo
+        sector_note = f"Sector/trabajo mencionado: {ref} (sin coincidencia clara con relés — se evalúan todos)"
     sector_html = f'<div class="meta" style="color:#6B7280">{sector_note}</div>' if sector_note else ""
     meta_html = f'<div class="meta">{meta_str}</div>' if meta_str else ""
     desc_html = f'<div class="desc">{desc_line}</div>' if desc_line else ""
