@@ -468,11 +468,11 @@ def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud
     if req_start_dt and req_end_dt:
         legend_html += ('<span style="display:flex;align-items:center;gap:5px">'
                         '<span style="width:10px;height:10px;border-radius:2px;'
-                        'background:#2E7D32;border:1px dashed #1B5E20;flex-shrink:0"></span>'
+                        'background:#CDEDD1;border:1px dashed #2E7D32;flex-shrink:0"></span>'
                         '<span>Cumple solicitud</span></span>')
         legend_html += ('<span style="display:flex;align-items:center;gap:5px">'
                         '<span style="width:10px;height:10px;border-radius:2px;'
-                        'background:#D32F2F;border:1px dashed #8C1414;flex-shrink:0"></span>'
+                        'background:#FAD2D2;border:1px dashed #C62828;flex-shrink:0"></span>'
                         '<span>No cumple solicitud</span></span>')
 
     import json as _json
@@ -606,10 +606,11 @@ allRows.forEach((row,i)=>{{
 
 // Compliance overlay — verde (cumple) / rojo (no cumple) sobre el tramo
 // solicitado, dibujado encima del amarillo, con borde punteado como el de Extensión
-const COMPLY_OK_FILL   = 'rgba(46,125,50,0.85)';   // mismo verde que st.success
-const COMPLY_OK_STROKE = 'rgba(27,94,32,0.95)';
-const COMPLY_BAD_FILL  = 'rgba(211,47,47,0.85)';
-const COMPLY_BAD_STROKE= 'rgba(140,20,20,0.95)';
+// Mismo nivel de transparencia/pastel que el amarillo de Extensión (rgba(254,243,205,0.92))
+const COMPLY_OK_FILL   = 'rgba(205,237,209,0.92)';  // verde pastel translúcido
+const COMPLY_OK_STROKE = 'rgba(46,125,50,0.8)';
+const COMPLY_BAD_FILL  = 'rgba(250,210,210,0.92)';  // rojo pastel translúcido
+const COMPLY_BAD_STROKE= 'rgba(198,40,40,0.8)';
 allRows.forEach((row,i)=>{{
   if(!row.compliance||!row.compliance.length)return;
   const top = i*ROW_H + PAD_TOP - PAD_EXT;
@@ -851,30 +852,9 @@ def main():
             "state": state,
         }
         auth_url = "https://accounts.google.com/o/oauth2/auth?" + urllib.parse.urlencode(params)
-        # Botón nativo de Streamlit (siempre clickeable) + JS que intenta romper
-        # el iframe por varias vías, con fallback visible si todas fallan.
-        if st.button("Iniciar sesión con Google", type="primary", key="btn_google_login"):
-            st.session_state["_pending_auth_url"] = auth_url
-            st.rerun()
-
-        if st.session_state.get("_pending_auth_url"):
-            _url = st.session_state["_pending_auth_url"]
-            st.components.v1.html(
-                f'''<script>
-                (function() {{
-                    var url = "{_url}";
-                    try {{ window.top.location.href = url; return; }} catch(e) {{}}
-                    try {{ window.parent.location.href = url; return; }} catch(e) {{}}
-                    window.location.href = url;
-                }})();
-                </script>''',
-                height=0,
-            )
-            st.markdown(
-                f'Si no fuiste redirigido automáticamente, '
-                f'<a href="{_url}" target="_blank">haz clic aquí para continuar</a>.',
-                unsafe_allow_html=True
-            )
+        # st.link_button es manejado nativamente por Streamlit (no vive dentro
+        # de un iframe propio con sandbox restrictivo), por eso sí navega bien.
+        st.link_button("Iniciar sesión con Google", auth_url, type="primary")
         qp = st.query_params
         if "code" in qp and "error" not in qp:
             import httpx
@@ -902,7 +882,6 @@ def main():
                 ).json()
                 st.session_state["user_email"] = user_info.get("email", "")
                 st.session_state["user_name"]  = user_info.get("name", "")
-                st.session_state.pop("_pending_auth_url", None)
                 st.query_params.clear()
                 st.rerun()
             else:
