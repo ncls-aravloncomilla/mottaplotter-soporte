@@ -468,11 +468,11 @@ def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud
     if req_start_dt and req_end_dt:
         legend_html += ('<span style="display:flex;align-items:center;gap:5px">'
                         '<span style="width:10px;height:10px;border-radius:2px;'
-                        'background:#8BF58F;flex-shrink:0"></span>'
+                        'background:#2E7D32;border:1px dashed #1B5E20;flex-shrink:0"></span>'
                         '<span>Cumple solicitud</span></span>')
         legend_html += ('<span style="display:flex;align-items:center;gap:5px">'
                         '<span style="width:10px;height:10px;border-radius:2px;'
-                        'background:#FF716D;flex-shrink:0"></span>'
+                        'background:#D32F2F;border:1px dashed #8C1414;flex-shrink:0"></span>'
                         '<span>No cumple solicitud</span></span>')
 
     import json as _json
@@ -605,19 +605,23 @@ allRows.forEach((row,i)=>{{
 }});
 
 // Compliance overlay — verde (cumple) / rojo (no cumple) sobre el tramo
-// solicitado, dibujado encima del amarillo
+// solicitado, dibujado encima del amarillo, con borde punteado como el de Extensión
+const COMPLY_OK_FILL   = 'rgba(46,125,50,0.85)';   // mismo verde que st.success
+const COMPLY_OK_STROKE = 'rgba(27,94,32,0.95)';
+const COMPLY_BAD_FILL  = 'rgba(211,47,47,0.85)';
+const COMPLY_BAD_STROKE= 'rgba(140,20,20,0.95)';
 allRows.forEach((row,i)=>{{
   if(!row.compliance||!row.compliance.length)return;
   const top = i*ROW_H + PAD_TOP - PAD_EXT;
   const h   = BAR_H + PAD_EXT*2;
   row.compliance.forEach(([s,e,ok])=>{{
     const x0=secToX(s),x1=secToX(e);
-    ctx.fillStyle = ok ? 'rgba(76,175,80,0.85)' : 'rgba(229,57,53,0.85)';
+    ctx.fillStyle = ok ? COMPLY_OK_FILL : COMPLY_BAD_FILL;
     ctx.fillRect(x0,top,x1-x0,h);
     ctx.setLineDash([3,3]);
-    ctx.strokeStyle = ok ? 'rgba(46,125,50,0.9)' : 'rgba(183,28,28,0.9)';
-    ctx.lineWidth=1;
-    ctx.strokeRect(x0,top,x1-x0,h);
+    ctx.lineWidth=1.3;
+    ctx.strokeStyle = ok ? COMPLY_OK_STROKE : COMPLY_BAD_STROKE;
+    ctx.strokeRect(x0+0.5,top+0.5,(x1-x0)-1,h-1);
     ctx.setLineDash([]);
   }});
 }});
