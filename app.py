@@ -295,10 +295,49 @@ def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud
         if not is_clima and not is_ilum:        return True  # dispositivo no clasificado, no se filtra
         return False
 
-    def compute_compliance(day_obj, on_intervals, device_name):
+    # ── Regla Normal/Emergencia (tiendas sin PDF descriptivo) ──
+    # Si un dispositivo tiene relés que distinguen "normal" y "emergencia" en su
+    # nombre, los relés "normal" se excluyen por completo (ni amarillo ni
+    # verde/rojo) — solo los de "emergencia" son válidos para evaluar la extensión.
+    excluded_normal_relays = {}  # device_name -> set(relay_keys a excluir)
+    for dev_name, dev in relay_control["devices"].items():
+        rkeys = list(dev["config_x_relay"].keys())
+        has_normal    = any("normal" in rk.lower() for rk in rkeys)
+        has_emergencia = any("emergenc" in rk.lower() for rk in rkeys)
+        if has_normal and has_emergencia:
+            excluded_normal_relays[dev_name] = {
+                rk for rk in rkeys if "normal" in rk.lower() and "emergenc" not in rk.lower()
+            }
+
+    def _relay_is_excluded(device_name, relay_key):
+        return relay_key in excluded_normal_relays.get(device_name, set())
+
+    # ── Match de sector (Claude, texto) → relés específicos del sector mencionado ──
+    # Si hay match con resultado no vacío, el cumplimiento solo se evalúa en esos
+    # relés puntuales; si no hay sector mencionado o no hubo match, se mantiene
+    # el comportamiento general (todos los relés del dispositivo correspondiente).
+    matched_relay_names = set()
+    sector_mencionado = (solicitud_data or {}).get("sector_mencionado")
+    if sector_mencionado:
+        all_relay_names = tuple(sorted(set(
+            rk for dev in relay_control["devices"].values()
+            for rk in dev["config_x_relay"].keys()
+        )))
+        try:
+            matched_relay_names = set(match_relays_sector(sector_mencionado, all_relay_names))
+        except Exception:
+            matched_relay_names = set()
+
+    def compute_compliance(day_obj, on_intervals, device_name, relay_key=None):
         """Devuelve lista de (inicio_seg, fin_seg, cumple:bool) recortada a la
         intersección del rango solicitado con el día actual. [] si no aplica."""
         if not req_start_dt or not req_end_dt or not _device_matches_req(device_name):
+            return []
+        # Relés "normal" excluidos cuando coexisten con "emergencia" en el dispositivo
+        if relay_key is not None and _relay_is_excluded(device_name, relay_key):
+            return []
+        # Si se identificó un sector con relés específicos, solo evaluar esos
+        if matched_relay_names and relay_key is not None and relay_key not in matched_relay_names:
             return []
         day_start = datetime.combine(day_obj, datetime.min.time())
         day_end   = day_start + timedelta(days=1)
@@ -343,12 +382,15 @@ def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud
             on_now = get_relay_on_intervals(active_cfg, weekday_num,
                                             channel_schedules, any_ww_device)
             relay_rows[relay_key] = on_now
-            relay_compliance[relay_key] = compute_compliance(date_obj, on_now, device_name)
+            relay_compliance[relay_key] = compute_compliance(date_obj, on_now, device_name, relay_key)
         ext_delta = []
         relay_deltas = {}  # delta individual por relay (para amarillo por fila)
         if is_ext:
             all_delta = []
             for rk in relay_rows:
+                if _relay_is_excluded(device_name, rk):
+                    relay_deltas[rk] = []  # relé "normal" excluido: sin amarillo
+                    continue
                 d = merge_intervals(diff_intervals(normal_rows[rk], relay_rows[rk]))
                 relay_deltas[rk] = d
                 all_delta.extend(d)
@@ -374,6 +416,7 @@ def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud
         for device_name, device in relay_control["devices"].items():
             color = device_color_map[device_name]
             for relay_key in device["config_x_relay"].keys():
+                relay_excluded = _relay_is_excluded(device_name, relay_key)
                 relay_rows   = {}
                 row_deltas   = {}  # day_label → delta de ese día para este relay
                 row_compliance = {}  # day_label → cumplimiento de ese día para este relay
@@ -382,8 +425,9 @@ def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud
                     dd = compute_device_day(device_name, device, date_obj)
                     day_label = f"{dd['day_str'][:5]}{'  ★' if dd['is_ext'] else ''}"
                     relay_rows[day_label] = dd["relay_rows"].get(relay_key, [])
-                    row_compliance[day_label] = dd["relay_compliance"].get(relay_key, [])
-                    if dd["is_ext"]:
+                    # Relé "normal" excluido: sin compliance ni delta (amarillo)
+                    row_compliance[day_label] = [] if relay_excluded else dd["relay_compliance"].get(relay_key, [])
+                    if dd["is_ext"] and not relay_excluded:
                         any_ext = True
                         # Delta específico de ESTE relay en ESTE día
                         weekday_num  = date_obj.isoweekday()
@@ -449,6 +493,12 @@ def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud
         if solicitud_data.get("solicitante"): meta_parts.append("· " + solicitud_data["solicitante"])
         if solicitud_data.get("descripcion"): desc_line = solicitud_data["descripcion"]
     meta_str  = "  ".join(meta_parts)
+    sector_note = ""
+    if sector_mencionado and matched_relay_names:
+        sector_note = f"Sector identificado: {sector_mencionado} → {', '.join(sorted(matched_relay_names))}"
+    elif sector_mencionado:
+        sector_note = f"Sector mencionado: {sector_mencionado} (sin coincidencia clara con relés — se evalúan todos)"
+    sector_html = f'<div class="meta" style="color:#6B7280">{sector_note}</div>' if sector_note else ""
     meta_html = f'<div class="meta">{meta_str}</div>' if meta_str else ""
     desc_html = f'<div class="desc">{desc_line}</div>' if desc_line else ""
 
@@ -524,6 +574,7 @@ body{{background:white;font-family:Arial,sans-serif;padding:16px}}
 <div class="title">Programación configurada — {sucursal_name}{ext_label_str}</div>
 {meta_html}
 {desc_html}
+{sector_html}
 <div class="legend">{legend_html}</div>
 <div class="chart-wrap">
   <div class="y-axis" id="yaxis"></div>
@@ -803,7 +854,12 @@ def extraer_datos_solicitud(img_bytes: bytes, mime_type: str) -> dict:
                         "Extrae los campos visibles y responde ÚNICAMENTE con JSON puro sin markdown ni texto adicional.\n"
                         "Formato exacto (una sola línea):\n"
                         '{"tienda":"R0XX - Nombre","solicitante":"Nombre Apellido","servicio":"Extensión Iluminación",'
-                        '"fecha_inicio":"DD/MM/YYYY HH:MM","fecha_fin":"DD/MM/YYYY HH:MM","descripcion":"texto"}\n'
+                        '"fecha_inicio":"DD/MM/YYYY HH:MM","fecha_fin":"DD/MM/YYYY HH:MM","descripcion":"texto",'
+                        '"sector_mencionado":"texto"}\n'
+                        "El campo sector_mencionado debe resumir en pocas palabras qué piso, sector, o área física "
+                        "se menciona en la solicitud (por ejemplo en el campo 'Empresas que trabajarán' o en la "
+                        "descripción) — ej: 'Sala Ventas 1, Escalera Mecánica' o 'Piso 2 completo'. "
+                        "Si no se menciona ningún sector específico usa null.\n"
                         "Si un campo no aparece usa null. Responde SOLO con el JSON, empezando con { y terminando con }."
                     )
                 }
@@ -831,6 +887,52 @@ def parse_fecha(fecha_str):
         return datetime.strptime(fecha_str.split()[0], "%d/%m/%Y").date()
     except Exception:
         return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def match_relays_sector(sector_mencionado: str, relay_names_tuple: tuple) -> list:
+    """Usa Claude (solo texto) para identificar qué relays, de la lista real
+    del dispositivo, corresponden al sector/piso mencionado en la solicitud.
+    Devuelve lista de nombres de relay que coinciden, o [] si no aplica/no hay match.
+    """
+    if not sector_mencionado or not relay_names_tuple:
+        return []
+    import anthropic, json as _json, re as _re
+    client = anthropic.Anthropic(api_key=st.secrets["anthropic"]["api_key"])
+    relay_list_str = "\n".join(f"- {r}" for r in relay_names_tuple)
+    msg = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=300,
+        messages=[{
+            "role": "user",
+            "content": (
+                f"Una solicitud de extensión horaria menciona este sector/área de trabajo:\n"
+                f'"{sector_mencionado}"\n\n'
+                f"Estos son los nombres reales de los relés/canales configurados en el dispositivo:\n"
+                f"{relay_list_str}\n\n"
+                "Identifica cuáles de esos relés corresponden al sector mencionado "
+                "(ej. si menciona 'Piso 1' y 'Escalera Mecánica', deben coincidir relés "
+                "con esos nombres o equivalentes). Si el sector menciona varias áreas, "
+                "incluye los relés de todas. Si no puedes determinar relación clara con "
+                "ningún relé, responde con lista vacía.\n"
+                "Responde ÚNICAMENTE con un array JSON de strings con los nombres EXACTOS "
+                "de los relés que coinciden, tal como aparecen en la lista. Sin texto adicional.\n"
+                'Ejemplo de formato: ["Piso 1 emergencia", "Escalera mecanica"]'
+            )
+        }]
+    )
+    text = msg.content[0].text.strip()
+    text = _re.sub(r'^```[a-z]*\n?', '', text)
+    text = _re.sub(r'\n?```$', '', text)
+    text = text.strip()
+    match = _re.search(r'\[.*\]', text, _re.DOTALL)
+    if match:
+        text = match.group(0)
+    try:
+        result = _json.loads(text)
+        return [r for r in result if r in relay_names_tuple]
+    except Exception:
+        return []
 
 
 def main():
