@@ -240,6 +240,44 @@ def merge_intervals(intervals):
         else: res.append((s, e))
     return res
 
+# ─── Reglas explícitas de excepción (descripción → sector conocido) ──────────
+# Para casos donde la descripción del trabajo no aparece textualmente en la
+# tabla del PDF de la sucursal, pero la regla de negocio es conocida y fija.
+# Clave: código de sucursal (o "*" para todas). Valor: lista de (patrón regex
+# normalizado, "sector equivalente a usar en vez del sector marcado").
+import unicodedata as _unicodedata
+
+def _normalizar_texto(s):
+    """minúsculas, sin acentos, espacios colapsados — para comparar de forma
+    tolerante a variaciones de escritura del usuario."""
+    if not s:
+        return ""
+    s = _unicodedata.normalize("NFKD", s.lower())
+    s = "".join(c for c in s if not _unicodedata.combining(c))
+    s = _re_top.sub(r"\s+", " ", s).strip()
+    return s
+
+REGLAS_DESCRIPCION_SECTOR = {
+    "*": [
+        # "descarga camion" / "descarga de camion" / con o sin acentos
+        (r"descarga\s+(de\s+)?camion", "Sala Venta Piso 1, Escalera Mecánica"),
+    ],
+}
+
+def resolver_sector_por_descripcion(codigo_sucursal, descripcion):
+    """Si la descripción coincide con una regla conocida (genérica o específica
+    de la sucursal), devuelve el sector equivalente a usar. Si no hay match,
+    devuelve None (se sigue el flujo normal con sector_mencionado/Claude)."""
+    desc_norm = _normalizar_texto(descripcion)
+    if not desc_norm:
+        return None
+    reglas = REGLAS_DESCRIPCION_SECTOR.get(codigo_sucursal, []) + REGLAS_DESCRIPCION_SECTOR.get("*", [])
+    for patron, sector_equivalente in reglas:
+        if _re_top.search(patron, desc_norm):
+            return sector_equivalente
+    return None
+
+
 # ─── Generador de HTML del gráfico ─────────────────────────────────────────────
 def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud_data=None, view_mode="dia"):
     if isinstance(config_data, list):
@@ -318,17 +356,29 @@ def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud
     # relés puntuales; si no hay sector mencionado o no hubo match, se mantiene
     # el comportamiento general (todos los relés del dispositivo correspondiente).
     matched_relay_names = set()
-    sector_mencionado = (solicitud_data or {}).get("sector_mencionado")
+    sector_mencionado   = (solicitud_data or {}).get("sector_mencionado")
+    descripcion_trabajo  = (solicitud_data or {}).get("descripcion")
     pdf_contexto = ""
-    if sector_mencionado:
-        codigo_suc = extraer_codigo_sucursal(sucursal_name)
+    codigo_suc   = extraer_codigo_sucursal(sucursal_name)
+    sector_via_regla_explicita = resolver_sector_por_descripcion(codigo_suc, descripcion_trabajo)
+    if sector_via_regla_explicita:
+        # Regla de negocio conocida y fija: la descripción prevalece sobre
+        # cualquier sector marcado manualmente (que puede tener error humano).
+        sector_mencionado_efectivo = sector_via_regla_explicita
+    else:
+        sector_mencionado_efectivo = sector_mencionado
+
+    if sector_mencionado_efectivo or descripcion_trabajo:
         pdf_contexto = cargar_pdf_sucursal_texto(codigo_suc)
         all_relay_names = tuple(sorted(set(
             rk for dev in relay_control["devices"].values()
             for rk in dev["config_x_relay"].keys()
         )))
         try:
-            matched_relay_names = set(match_relays_sector(sector_mencionado, all_relay_names, pdf_contexto))
+            matched_relay_names = set(match_relays_sector(
+                sector_mencionado_efectivo, all_relay_names, pdf_contexto,
+                descripcion_trabajo if not sector_via_regla_explicita else ""
+            ))
         except Exception:
             matched_relay_names = set()
 
@@ -930,24 +980,33 @@ def cargar_pdf_sucursal_texto(codigo_sucursal: str) -> str:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def match_relays_sector(sector_mencionado: str, relay_names_tuple: tuple,
-                         pdf_contexto: str = "") -> list:
+                         pdf_contexto: str = "", descripcion: str = "") -> list:
     """Usa Claude (solo texto) para identificar qué relays, de la lista real
-    del dispositivo, corresponden al sector/piso mencionado en la solicitud.
+    del dispositivo, corresponden al trabajo solicitado.
+    Recibe tanto el sector (sector_mencionado, ya puede venir resuelto por una
+    regla explícita de excepción) como la descripción libre del trabajo —
+    cuando ambos están presentes, se le pide a Claude que priorice la
+    descripción si coincide con un tipo de trabajo conocido del PDF.
     Si se entrega pdf_contexto (texto del PDF de horarios de la sucursal),
     se usa como fuente de verdad principal para el mapeo sector→relés, ya que
     contiene la tabla oficial "Escenarios de iluminación según tipo de trabajo".
     Devuelve lista de nombres de relay que coinciden, o [] si no aplica/no hay match.
     """
-    if not sector_mencionado or not relay_names_tuple:
+    if (not sector_mencionado and not descripcion) or not relay_names_tuple:
         return []
     import anthropic, json as _json, re as _re
     client = anthropic.Anthropic(api_key=st.secrets["anthropic"]["api_key"])
     relay_list_str = "\n".join(f"- {r}" for r in relay_names_tuple)
 
+    contexto_solicitud = (
+        f'Sector/área a considerar: "{sector_mencionado or "no especificado"}"\n'
+        f'Descripción del trabajo: "{descripcion or "no especificada"}"'
+    )
+
     if pdf_contexto:
         prompt = (
-            f"Una solicitud de extensión horaria menciona este sector/área de trabajo:\n"
-            f'"{sector_mencionado}"\n\n'
+            f"Una solicitud de extensión horaria tiene esta información:\n"
+            f"{contexto_solicitud}\n\n"
             f"Este es el documento oficial de horarios y escenarios de iluminación de "
             f"la sucursal, que incluye una tabla de qué relé debe encenderse según el "
             f"tipo de trabajo o sector:\n\n{pdf_contexto}\n\n"
@@ -955,12 +1014,17 @@ def match_relays_sector(sector_mencionado: str, relay_names_tuple: tuple,
             f"dispositivo (pueden no coincidir exactamente en texto con el documento, "
             f"pero deben corresponder por número de RTU/relé o por piso/área):\n"
             f"{relay_list_str}\n\n"
-            "Usando la tabla de 'Escenarios de iluminación según tipo de trabajo' del "
-            "documento como fuente de verdad, identifica ÚNICAMENTE los relés que "
-            "deben encenderse para el sector/trabajo mencionado en la solicitud. "
+            "IMPORTANTE — orden de prioridad: si la DESCRIPCIÓN del trabajo coincide "
+            "claramente con un 'TIPO DE TRABAJO' listado en la tabla del documento "
+            "(sin importar variaciones de escritura, acentos o mayúsculas), usa ESE "
+            "tipo de trabajo de la tabla como fuente de verdad — el sector marcado "
+            "puede estar mal seleccionado por error del solicitante y NO debe usarse "
+            "en ese caso. Solo si la descripción no coincide con ningún tipo de trabajo "
+            "conocido, usa el sector como respaldo.\n"
+            "Identifica ÚNICAMENTE los relés que deben encenderse según esa prioridad. "
             "Sé preciso: si el documento indica que solo cierto piso o relé específico "
             "corresponde al trabajo, no incluyas otros pisos o relés aunque tengan "
-            "nombres similares. Si no hay relación clara, responde con lista vacía.\n"
+            "nombres similares. Si no hay relación clara con nada, responde lista vacía.\n"
             "Responde ÚNICAMENTE con un array JSON de strings con los nombres EXACTOS "
             "de los relés que coinciden, tal como aparecen en la lista de relés reales. "
             "Sin texto adicional.\n"
@@ -968,14 +1032,13 @@ def match_relays_sector(sector_mencionado: str, relay_names_tuple: tuple,
         )
     else:
         prompt = (
-            f"Una solicitud de extensión horaria menciona este sector/área de trabajo:\n"
-            f'"{sector_mencionado}"\n\n'
+            f"Una solicitud de extensión horaria tiene esta información:\n"
+            f"{contexto_solicitud}\n\n"
             f"Estos son los nombres reales de los relés/canales configurados en el dispositivo:\n"
             f"{relay_list_str}\n\n"
-            "Identifica cuáles de esos relés corresponden al sector mencionado "
+            "Identifica cuáles de esos relés corresponden al trabajo solicitado "
             "(ej. si menciona 'Piso 1' y 'Escalera Mecánica', deben coincidir relés "
-            "con esos nombres o equivalentes). Si el sector menciona varias áreas, "
-            "incluye los relés de todas. Si no puedes determinar relación clara con "
+            "con esos nombres o equivalentes). Si no puedes determinar relación clara con "
             "ningún relé, responde con lista vacía.\n"
             "Responde ÚNICAMENTE con un array JSON de strings con los nombres EXACTOS "
             "de los relés que coinciden, tal como aparecen en la lista. Sin texto adicional.\n"
