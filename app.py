@@ -290,6 +290,117 @@ def resolver_relays_por_descripcion(codigo_sucursal, descripcion, relay_names_tu
     return []
 
 
+# ─── Sistema determinístico: alias del formulario → canales que enciende ──────
+# Para sucursales con tabla "Escenarios de iluminación según tipo de trabajo"
+# conocida, resolvemos el sector SIN pasar por Claude — más confiable.
+#
+# Estructura por código de sucursal:
+#   "alias_a_tipo_trabajo": {alias normalizado (regex) -> tipo de trabajo}
+#   "canales_por_tipo_trabajo": {tipo de trabajo -> set de números de canal}
+#   "relay_por_canal": {número de canal -> patrón regex del nombre real del relay}
+TABLA_SECTORES_SUCURSAL = {
+    "R041": {
+        "alias_a_tipo_trabajo": {
+            r"mantenimiento": "mantencion_escalas",
+            r"mantencion": "mantencion_escalas",
+            r"sala\s*ventas?\s*1\b": "trabajos_piso_1",
+            r"sala\s*ventas?\s*2\b": "trabajos_piso_2",
+            r"sala\s*ventas?\s*3\b": "trabajos_piso_3",
+            r"tras\s*tienda": "tras_tienda",
+            r"inventario": "inventarios",
+        },
+        "canales_por_tipo_trabajo": {
+            "mantencion_escalas": {4, 8},
+            "trabajos_piso_1":    {4, 5, 8},
+            "trabajos_piso_2":    {4, 6, 8},
+            "trabajos_piso_3":    {4, 7, 8},
+            "tras_tienda":        {8},
+            "inventarios":        {1, 2, 3, 4, 5, 6, 7, 8},
+        },
+        "relay_por_canal": {
+            1: r"normal\s*piso\s*1",
+            2: r"normal\s*piso\s*2",
+            3: r"normal\s*piso\s*3",
+            4: r"mantenci.n\s*escalas?\s*mec",
+            5: r"emerg.*piso\s*1",
+            6: r"emerg.*piso\s*2",
+            7: r"emerg.*piso\s*3",
+            8: r"piso\s*4.*back\s*office|back\s*office.*piso\s*4|escalas?\s*emergenc",
+        },
+    },
+    "R019": {
+        "alias_a_tipo_trabajo": {
+            r"mantenci.n\s*escala\s*mec": "mantencion_escala",
+            r"sala\s*ventas?\s*1\b": "trabajos_piso_1",
+            r"sala\s*ventas?\s*2\b": "trabajos_piso_2",
+            r"sala\s*ventas?\s*3\b": "trabajos_piso_3",
+            r"sala\s*ventas?\s*4\b": "trabajos_piso_4",
+            r"inventario": "inventarios",
+        },
+        "canales_por_tipo_trabajo": {
+            "mantencion_escala": {1},          # RTU-2 R1
+            "trabajos_piso_1":   {5, 1},        # RTU-1 R5 + RTU-2 R1
+            "trabajos_piso_2":   {6, 1},
+            "trabajos_piso_3":   {7, 1},
+            "trabajos_piso_4":   {8, 1},
+            "inventarios":       {1, 2, 3, 4, 5, 6, 7, 8},
+        },
+        "relay_por_canal": {
+            1: r"escalera\s*mecanica|piso\s*1\s*normal\s*enc",  # ambiguo entre RTU-1/RTU-2, se resuelve por nombre exacto abajo
+            2: r"piso\s*2\s*normal\b",
+            3: r"piso\s*3\s*normal\b",
+            4: r"piso\s*4\s*normal\b",
+            5: r"piso\s*1\s*emergenc",
+            6: r"piso\s*2\s*emergenc",
+            7: r"piso\s*3\s*emergenc",
+            8: r"piso\s*4\s*emergenc",
+        },
+    },
+}
+
+
+def resolver_relays_por_sector_determinístico(codigo_sucursal, sector_mencionado, relay_names_tuple):
+    """Resuelve el sector usando la TABLA_SECTORES_SUCURSAL — sin Claude.
+    Separa el sector por guiones (entidades independientes), mapea cada alias
+    a su tipo de trabajo, une todos los canales involucrados, y traduce esos
+    canales a los nombres reales de relay. Devuelve [] si la sucursal no tiene
+    tabla definida o no se reconoce ningún alias (se sigue el flujo con Claude)."""
+    tabla = TABLA_SECTORES_SUCURSAL.get(codigo_sucursal)
+    if not tabla or not sector_mencionado or not relay_names_tuple:
+        return []
+
+    sector_norm = _normalizar_texto(sector_mencionado)
+    partes = [p.strip() for p in _re_top.split(r"[-,]", sector_norm) if p.strip()]
+    if not partes:
+        return []
+
+    canales_totales = set()
+    alias_map = tabla["alias_a_tipo_trabajo"]
+    canales_map = tabla["canales_por_tipo_trabajo"]
+    algun_alias_reconocido = False
+
+    for parte in partes:
+        for patron_alias, tipo_trabajo in alias_map.items():
+            if _re_top.search(patron_alias, parte):
+                algun_alias_reconocido = True
+                canales_totales |= canales_map.get(tipo_trabajo, set())
+
+    if not algun_alias_reconocido:
+        return []
+
+    # Traducir canales a nombres reales de relay
+    relay_por_canal = tabla["relay_por_canal"]
+    matched = set()
+    for canal in canales_totales:
+        patron_relay = relay_por_canal.get(canal)
+        if not patron_relay:
+            continue
+        for rk in relay_names_tuple:
+            if _re_top.search(patron_relay, _normalizar_texto(rk)):
+                matched.add(rk)
+    return sorted(matched)
+
+
 # ─── Generador de HTML del gráfico ─────────────────────────────────────────────
 def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud_data=None, view_mode="dia"):
     if isinstance(config_data, list):
@@ -378,14 +489,25 @@ def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud
         for rk in dev["config_x_relay"].keys()
     )))
 
-    # 1) Regla explícita conocida: match directo contra nombres reales de relays,
-    #    sin pasar por Claude — más confiable para casos de excepción documentados.
+    # 1) Regla explícita conocida (descripción tipo "Descarga de Camión"):
+    #    match directo contra nombres reales de relays, sin pasar por Claude.
     relays_via_regla = resolver_relays_por_descripcion(codigo_suc, descripcion_trabajo, all_relay_names)
+
+    # 2) Sin esa regla: tabla determinística de la sucursal (alias→canales→relay),
+    #    construida a partir del PDF de "Escenarios de iluminación", sin Claude.
+    relays_via_tabla = []
+    if not relays_via_regla and sector_mencionado:
+        relays_via_tabla = resolver_relays_por_sector_determinístico(
+            codigo_suc, sector_mencionado, all_relay_names
+        )
 
     if relays_via_regla:
         matched_relay_names = set(relays_via_regla)
+    elif relays_via_tabla:
+        matched_relay_names = set(relays_via_tabla)
     elif sector_mencionado or descripcion_trabajo:
-        # 2) Sin regla explícita: usar Claude con sector + descripción + PDF (si existe)
+        # 3) Sin tabla determinística para esta sucursal: usar Claude con
+        #    sector + descripción + PDF (si existe) como respaldo flexible.
         pdf_contexto = cargar_pdf_sucursal_texto(codigo_suc)
         try:
             matched_relay_names = set(match_relays_sector(
@@ -562,6 +684,9 @@ def build_chart_html(config_data, sucursal_name, start_date, end_date, solicitud
     sector_note = ""
     if relays_via_regla:
         sector_note = (f"Trabajo identificado por regla conocida: \"{descripcion_trabajo}\" "
+                        f"→ {', '.join(sorted(matched_relay_names))}")
+    elif relays_via_tabla:
+        sector_note = (f"Sector resuelto por tabla de la sucursal: \"{sector_mencionado}\" "
                         f"→ {', '.join(sorted(matched_relay_names))}")
     elif matched_relay_names:
         _fuente = " según PDF de la sucursal" if pdf_contexto else ""
@@ -946,13 +1071,18 @@ def extraer_datos_solicitud(img_bytes: bytes, mime_type: str) -> dict:
                         '{"tienda":"R0XX - Nombre","solicitante":"Nombre Apellido","servicio":"Extensión Iluminación",'
                         '"fecha_inicio":"DD/MM/YYYY HH:MM","fecha_fin":"DD/MM/YYYY HH:MM","descripcion":"texto",'
                         '"sector_mencionado":"texto"}\n'
-                        "El campo sector_mencionado debe ser el texto LITERAL que aparece entre paréntesis en el "
-                        "campo 'Empresas que trabajarán' (NO lo resumas ni lo reformules). Ese texto suele tener "
-                        "el formato 'Tipo de trabajo - Sector1 - Sector2 - ...' separado por guiones — cada parte "
-                        "separada por un guion es una entidad independiente (ej. 'Mantenimiento - Sala Ventas 1' "
-                        "significa DOS cosas distintas: 'Mantenimiento' Y 'Sala Ventas 1', no una sola frase). "
-                        "Copia el texto tal cual aparece, incluyendo los guiones, sin interpretarlo.\n"
-                        "Si no se menciona ningún sector específico usa null.\n"
+                        "IMPORTANTE — estos son DOS campos DISTINTOS del formulario, NO los mezcles:\n"
+                        "1. 'descripcion' = el texto que aparece en la fila 'Descripción' del formulario "
+                        "(ej. 'descarga camion', 'reparación motor cortina').\n"
+                        "2. 'sector_mencionado' = ÚNICAMENTE el texto que aparece DENTRO DEL PARÉNTESIS en la "
+                        "fila 'Empresas que trabajarán' (ej. en 'Ac montelec (Mantenimiento - Sala Ventas 1)', "
+                        "sector_mencionado debe ser exactamente 'Mantenimiento - Sala Ventas 1' — el nombre de "
+                        "la empresa NO va en este campo, y el texto de 'Descripción' tampoco debe aparecer aquí).\n"
+                        "Copia sector_mencionado de forma LITERAL, sin resumir ni reformular, preservando los "
+                        "guiones tal cual aparecen — cada parte separada por guion es una entidad independiente "
+                        "(ej. 'Mantenimiento - Sala Ventas 1' son DOS cosas: 'Mantenimiento' Y 'Sala Ventas 1').\n"
+                        "Si el formulario no tiene paréntesis o no menciona sector en 'Empresas que trabajarán', "
+                        "usa null para sector_mencionado — NO completes este campo con información de otra fila.\n"
                         "Si un campo no aparece usa null. Responde SOLO con el JSON, empezando con { y terminando con }."
                     )
                 }
