@@ -328,6 +328,43 @@ TABLA_SECTORES_SUCURSAL = {
             8: r"piso\s*4.*back\s*office|back\s*office.*piso\s*4|escalas?\s*emergenc",
         },
     },
+    "R002": {
+        # PDF Antofagasta: R2,R4,R6,R8 son Emergencia; R1,R3,R5,R7 son Normal.
+        # Trabajos por piso usan relays de Emergencia.
+        # "Trabajo Tienda" en formulario equivale a todos los pisos = Inventarios.
+        "alias_a_tipo_trabajo": {
+            r"trabajo\s*tienda":           "inventarios",
+            r"sala\s*ventas?\s*1\b":       "trabajos_piso_1",
+            r"sala\s*ventas?\s*2\b":       "trabajos_piso_2",
+            r"sala\s*ventas?\s*3\b":       "trabajos_piso_3",
+            r"sala\s*ventas?\s*4\b":       "trabajos_piso_4",
+            r"sala\s*ventas?\s*5\b":       "trabajos_piso_5",
+            r"escalera\s*mec":             "mantencion_escala",
+            r"mantenci.n\s*escala\s*mec":  "mantencion_escala",
+            r"inventario":                 "inventarios",
+        },
+        "canales_por_tipo_trabajo": {
+            "mantencion_escala": {2},              # RTU-1 R2
+            "trabajos_piso_1":   {2},              # RTU-1 R2 (emerg piso 1)
+            "trabajos_piso_2":   {4},              # RTU-1 R4
+            "trabajos_piso_3":   {6},              # RTU-1 R6
+            "trabajos_piso_4":   {8},              # RTU-1 R8
+            "trabajos_piso_5":   {10},             # RTU-2 R2 (canal 10 para diferenciar de RTU-1)
+            "inventarios":       {1,2,3,4,5,6,7,8,9,10},
+        },
+        "relay_por_canal": {
+            1:  r"normal\s*piso\s*1",
+            2:  r"emergenc.*piso\s*1|piso\s*1.*emergenc|mant.*esc.*mec",
+            3:  r"normal\s*piso\s*2",
+            4:  r"emergenc.*piso\s*2|piso\s*2.*emergenc",
+            5:  r"normal\s*piso\s*3",
+            6:  r"emergenc.*piso\s*3|piso\s*3.*emergenc",
+            7:  r"normal\s*piso\s*4",
+            8:  r"emergenc.*piso\s*4|piso\s*4.*emergenc",
+            9:  r"normal\s*piso\s*5",
+            10: r"emergenc.*piso\s*5|piso\s*5.*emergenc",
+        },
+    },
     "R019": {
         "alias_a_tipo_trabajo": {
             r"mantenci.n\s*escala\s*mec": "mantencion_escala",
