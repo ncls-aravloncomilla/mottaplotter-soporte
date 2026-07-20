@@ -115,7 +115,7 @@ def cargar_devices(company_id, building_id, model_id):
 def obtener_config_api(device_id):
     token = obtener_token_clickie()
     headers = {"Authorization": token, "Account": "33"}
-    dev_id = device_id.replace("CMWS", "")
+    dev_id = device_id.replace("CMWS", "").replace("_mig", "")
     r = requests.get(f"https://v4.api.clickie.io/clickiemotas/{dev_id}/configurations/active",
                      headers=headers)
     if r.status_code != 200:
